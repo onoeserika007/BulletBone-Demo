@@ -7,7 +7,8 @@ export type UpgradeId =
   | 'trait-rapid' | 'trait-gravity' | 'trait-guard' | 'trait-rage' | 'trait-survival'
   | 'chip-shell' | 'chip-counter' | 'chip-rage-core' | 'chip-rage-time'
   | 'affix-damage' | 'affix-fire-rate' | 'affix-speed' | 'affix-block-cooldown'
-  | 'affix-gravity-radius' | 'affix-health';
+  | 'affix-gravity-radius' | 'affix-health' | 'affix-laser-power' | 'affix-gravity-power'
+  | 'affix-counter-power' | 'affix-rage-time';
 
 export interface CombatStats {
   maxHp: number;
@@ -26,6 +27,8 @@ export interface CombatStats {
 
 interface ModifierTotals {
   damage: number;
+  laserDamage: number;
+  gravityDamage: number;
   fireRate: number;
   speed: number;
   maxHp: number;
@@ -58,6 +61,10 @@ export const AFFIXES: ChoiceOption[] = [
   { id: 'affix-block-cooldown', title: '回声骨壳', description: '格挡冷却 -25%', tag: '格挡词条' },
   { id: 'affix-gravity-radius', title: '奇点扩容', description: '重力场半径 +20%', tag: '重力词条' },
   { id: 'affix-health', title: '骨髓增生', description: '最大生命 +20%', tag: '生存词条' },
+  { id: 'affix-laser-power', title: '聚焦透镜', description: '激光伤害 +25%', tag: '激光词条' },
+  { id: 'affix-gravity-power', title: '坍缩增压', description: '重力坍缩伤害 +30%', tag: '重力词条' },
+  { id: 'affix-counter-power', title: '骨光回响', description: '格挡反击伤害 +35%', tag: '格挡词条' },
+  { id: 'affix-rage-time', title: '怒火余烬', description: '狂暴基础时间 +1 秒', tag: '狂暴词条' },
 ];
 
 export type StageKind = 'combat' | 'merchant' | 'chest' | 'boss';
@@ -72,11 +79,14 @@ export interface StageDefinition {
 }
 
 export const RUN_FLOW: StageDefinition[] = [
-  { id: 'combat-1', kind: 'combat', title: '外围入口', subtitle: '先让枪开口', melee: 5, ranged: 0, theme: 0x211a17 },
-  { id: 'merchant', kind: 'merchant', title: '废土商人', subtitle: '免费的第一次，往往最贵', theme: 0x17211e },
-  { id: 'combat-2', kind: 'combat', title: '激光走廊', subtitle: '红线出现时，迎着它格挡', melee: 3, ranged: 2, theme: 0x1d1719 },
+  { id: 'combat-1', kind: 'combat', title: '外围入口', subtitle: '先让枪开口', melee: 6, ranged: 0, theme: 0x211a17 },
+  { id: 'combat-2', kind: 'combat', title: '废料巷', subtitle: '别让它们围上来', melee: 5, ranged: 1, theme: 0x201813 },
+  { id: 'merchant', kind: 'merchant', title: '废土商人', subtitle: '打够两场，才有资格谈生意', theme: 0x17211e },
+  { id: 'combat-3', kind: 'combat', title: '激光走廊', subtitle: '红线出现时，迎着它格挡', melee: 4, ranged: 3, theme: 0x1d1719 },
+  { id: 'combat-4', kind: 'combat', title: '熔炉通道', subtitle: '火力开始升温', melee: 6, ranged: 2, theme: 0x251814 },
   { id: 'chest', kind: 'chest', title: '军械宝箱', subtitle: '橙色奇点正在苏醒', theme: 0x211d13 },
-  { id: 'combat-3', kind: 'combat', title: '坍缩工场', subtitle: '把它们拽到一起', melee: 6, ranged: 3, theme: 0x181524 },
+  { id: 'combat-5', kind: 'combat', title: '坍缩工场', subtitle: '把它们拽到一起', melee: 7, ranged: 3, theme: 0x181524 },
+  { id: 'combat-6', kind: 'combat', title: '核心防线', subtitle: '用成型 Build 撕开最后一道墙', melee: 5, ranged: 5, theme: 0x20141d },
   { id: 'boss', kind: 'boss', title: '钢铁海盗', subtitle: '接住最后一束光', theme: 0x241513 },
 ];
 
@@ -134,9 +144,9 @@ class RunState {
     return {
       maxHp: Math.round(BASE_STATS.maxHp * (1 + modifier.maxHp)),
       moveSpeed: BASE_STATS.moveSpeed * (1 + modifier.speed),
-      laserDamage: BASE_STATS.laserDamage * (1 + modifier.damage),
+      laserDamage: BASE_STATS.laserDamage * (1 + modifier.damage + modifier.laserDamage),
       laserIntervalMs: BASE_STATS.laserIntervalMs / (1 + modifier.fireRate),
-      gravityDamage: BASE_STATS.gravityDamage * (1 + modifier.damage),
+      gravityDamage: BASE_STATS.gravityDamage * (1 + modifier.damage + modifier.gravityDamage),
       gravityIntervalMs: BASE_STATS.gravityIntervalMs,
       gravityRadius: BASE_STATS.gravityRadius * (1 + modifier.gravityRadius),
       counterDamage: BASE_STATS.counterDamage * (1 + modifier.damage + modifier.counterDamage),
@@ -223,6 +233,8 @@ class RunState {
   private get modifiers(): ModifierTotals {
     const value: ModifierTotals = {
       damage: 0,
+      laserDamage: 0,
+      gravityDamage: 0,
       fireRate: 0,
       speed: 0,
       maxHp: 0,
@@ -249,6 +261,10 @@ class RunState {
         case 'affix-block-cooldown': value.blockCooldown += 0.25; break;
         case 'affix-gravity-radius': value.gravityRadius += 0.2; break;
         case 'affix-health': value.maxHp += 0.2; break;
+        case 'affix-laser-power': value.laserDamage += 0.25; break;
+        case 'affix-gravity-power': value.gravityDamage += 0.3; break;
+        case 'affix-counter-power': value.counterDamage += 0.35; break;
+        case 'affix-rage-time': value.rageDurationMs += 1000; break;
       }
     }
     return value;

@@ -8,9 +8,12 @@ import { ensureTextures } from '../combat/Textures';
 import { CHIPS, RUN_FLOW, runState } from '../run/RunState';
 import { clearOverlay, showChoices } from '../ui/Overlay';
 
-interface ProjectileData {
-  kind: 'laser' | 'gravity';
+interface GravityProjectileData {
   damage: number;
+  targetX: number;
+  targetY: number;
+  expiresAt: number;
+  marker: Phaser.GameObjects.Graphics;
 }
 
 interface GravityField {
@@ -24,13 +27,15 @@ interface GravityField {
 export class RoomScene extends Phaser.Scene {
   private player?: Player;
   private readonly enemies: Enemy[] = [];
-  private readonly projectileData = new Map<Phaser.Physics.Arcade.Sprite, ProjectileData>();
+  private readonly gravityProjectileData = new Map<Phaser.Physics.Arcade.Sprite, GravityProjectileData>();
   private readonly gravityFields: GravityField[] = [];
   private readonly shards: Phaser.Physics.Arcade.Sprite[] = [];
+  private readonly wallRects: Phaser.Geom.Rectangle[] = [];
   private enemyGroup?: Phaser.Physics.Arcade.Group;
-  private projectileGroup?: Phaser.Physics.Arcade.Group;
+  private gravityProjectileGroup?: Phaser.Physics.Arcade.Group;
   private walls?: Phaser.Physics.Arcade.StaticGroup;
   private hud?: Phaser.GameObjects.Text;
+  private blockHud?: Phaser.GameObjects.Text;
   private bossBar?: Phaser.GameObjects.Graphics;
   private roomClearing = false;
   private combatActive = false;
@@ -45,11 +50,13 @@ export class RoomScene extends Phaser.Scene {
     this.combatActive = false;
     this.player = undefined;
     this.hud = undefined;
+    this.blockHud = undefined;
     this.bossBar = undefined;
     this.enemies.length = 0;
     this.shards.length = 0;
     this.gravityFields.length = 0;
-    this.projectileData.clear();
+    this.wallRects.length = 0;
+    this.gravityProjectileData.clear();
     ensureTextures(this);
     clearOverlay();
     this.cameras.main.setBackgroundColor(runState.stage.theme);
@@ -74,25 +81,22 @@ export class RoomScene extends Phaser.Scene {
     this.walls = this.physics.add.staticGroup();
     this.createWalls();
     this.enemyGroup = this.physics.add.group();
-    this.projectileGroup = this.physics.add.group();
+    this.gravityProjectileGroup = this.physics.add.group();
 
     this.player = new Player(this, {
       fireLaser: (x, y, angle, damage) => this.fireLaser(x, y, angle, damage),
-      fireGravity: (x, y, angle, damage) => this.fireGravity(x, y, angle, damage),
+      fireGravity: (x, y, targetX, targetY, damage) => this.fireGravity(x, y, targetX, targetY, damage),
       fireCounter: (x, y, angle, damage) => this.fireCounter(x, y, angle, damage),
       hasLivingTargets: () => this.livingEnemyCount > 0,
       onDeath: () => this.onPlayerDeath(),
     });
     this.physics.add.collider(this.player.sprite, this.walls);
     this.physics.add.collider(this.enemyGroup, this.walls);
-    this.physics.add.collider(this.projectileGroup, this.walls, (object) => {
-      this.onProjectileHitWall(object as Phaser.Physics.Arcade.Sprite);
+    this.physics.add.collider(this.gravityProjectileGroup, this.walls, (projectileObject) => {
+      this.detonateGravity(projectileObject as Phaser.Physics.Arcade.Sprite);
     });
-    this.physics.add.overlap(this.projectileGroup, this.enemyGroup, (projectileObject, enemyObject) => {
-      this.onProjectileHitEnemy(
-        projectileObject as Phaser.Physics.Arcade.Sprite,
-        enemyObject as Phaser.Physics.Arcade.Sprite,
-      );
+    this.physics.add.overlap(this.gravityProjectileGroup, this.enemyGroup, (projectileObject) => {
+      this.detonateGravity(projectileObject as Phaser.Physics.Arcade.Sprite);
     });
 
     this.createHud();
@@ -107,6 +111,7 @@ export class RoomScene extends Phaser.Scene {
     if (!this.combatActive || !this.player) return;
     this.player.update(time, delta);
     for (const enemy of this.enemies) enemy.update(time);
+    this.updateGravityProjectiles(time, delta);
     this.updateGravityFields(time);
     this.updateShards();
     this.updateHud();
@@ -158,33 +163,67 @@ export class RoomScene extends Phaser.Scene {
   }
 
   private fireLaser(x: number, y: number, angle: number, damage: number): void {
-    if (!this.projectileGroup) return;
-    const projectile = this.physics.add.sprite(
-      x + Math.cos(angle) * 30,
-      y + Math.sin(angle) * 30,
-      'laser-bolt',
-    ).setRotation(angle).setDepth(16);
-    projectile.body.setSize(26, 6);
-    this.physics.velocityFromRotation(angle, 780, projectile.body.velocity);
-    this.projectileData.set(projectile, { kind: 'laser', damage });
-    this.projectileGroup.add(projectile);
-    this.time.delayedCall(1100, () => this.destroyProjectile(projectile));
+    const startX = x + Math.cos(angle) * 30;
+    const startY = y + Math.sin(angle) * 30;
+    const directionX = Math.cos(angle);
+    const directionY = Math.sin(angle);
+    let hitDistance = this.rayWallDistance(startX, startY, directionX, directionY, 2200);
+    let hitEnemy: Enemy | undefined;
+
+    for (const enemy of this.enemies) {
+      if (!enemy.alive) continue;
+      const offsetX = enemy.sprite.x - startX;
+      const offsetY = enemy.sprite.y - startY;
+      const projection = offsetX * directionX + offsetY * directionY;
+      if (projection <= 0 || projection >= hitDistance) continue;
+      const perpendicular = Math.abs(offsetX * directionY - offsetY * directionX);
+      const hitRadius = enemy.kind === 'boss' ? 46 : 22;
+      if (perpendicular <= hitRadius) {
+        hitDistance = projection;
+        hitEnemy = enemy;
+      }
+    }
+
+    const endX = startX + directionX * hitDistance;
+    const endY = startY + directionY * hitDistance;
+    const beam = this.add.graphics().setDepth(17);
+    beam.lineStyle(runState.rageActive ? 9 : 6, 0xffffff, 0.2).lineBetween(startX, startY, endX, endY);
+    beam.lineStyle(runState.rageActive ? 4 : 3, COLORS.playerLaser, 0.95).lineBetween(startX, startY, endX, endY);
+    this.tweens.add({ targets: beam, alpha: 0, duration: 75, onComplete: () => beam.destroy() });
+
+    if (hitEnemy) {
+      hitEnemy.takeDamage(damage);
+      this.createImpact(endX, endY, COLORS.playerLaser);
+    }
     this.createMuzzleFlash(x, y, angle, COLORS.playerLaser);
   }
 
-  private fireGravity(x: number, y: number, angle: number, damage: number): void {
-    if (!this.projectileGroup || !runState.weapons.has('gravity')) return;
-    const projectile = this.physics.add.sprite(
-      x + Math.cos(angle) * 34,
-      y + Math.sin(angle) * 34,
-      'gravity-orb',
-    ).setDepth(16);
-    projectile.setCircle(12, 3, 3);
-    this.physics.velocityFromRotation(angle, 330, projectile.body.velocity);
-    this.projectileData.set(projectile, { kind: 'gravity', damage });
-    this.projectileGroup.add(projectile);
-    this.tweens.add({ targets: projectile, angle: 360, duration: 420, repeat: -1 });
-    this.time.delayedCall(1350, () => this.detonateGravity(projectile));
+  private fireGravity(x: number, y: number, targetX: number, targetY: number, damage: number): void {
+    if (!runState.weapons.has('gravity') || !this.gravityProjectileGroup) return;
+    const landingX = Phaser.Math.Clamp(targetX, 62, GAME_WIDTH - 62);
+    const landingY = Phaser.Math.Clamp(targetY, 100, GAME_HEIGHT - 62);
+    const angle = Phaser.Math.Angle.Between(x, y, landingX, landingY);
+    const startX = x + Math.cos(angle) * 34;
+    const startY = y + Math.sin(angle) * 34;
+    const projectile = this.physics.add.sprite(startX, startY, 'gravity-orb').setDepth(22);
+    projectile.setCircle(12, 3, 3).setRotation(angle);
+    this.gravityProjectileGroup.add(projectile);
+    this.physics.velocityFromRotation(angle, 430, projectile.body.velocity);
+
+    const marker = this.add.graphics().setPosition(landingX, landingY).setDepth(7);
+    marker.lineStyle(2, COLORS.gravity, 0.7).strokeCircle(0, 0, 13);
+    marker.lineBetween(-21, 0, -8, 0).lineBetween(8, 0, 21, 0);
+    marker.lineBetween(0, -21, 0, -8).lineBetween(0, 8, 0, 21);
+    this.tweens.add({ targets: marker, alpha: 0.28, yoyo: true, repeat: -1, duration: 260 });
+    this.tweens.add({ targets: projectile, angle: projectile.angle + 360, duration: 380, repeat: -1 });
+    const travelMs = Phaser.Math.Distance.Between(startX, startY, landingX, landingY) / 430 * 1000;
+    this.gravityProjectileData.set(projectile, {
+      damage,
+      targetX: landingX,
+      targetY: landingY,
+      expiresAt: this.time.now + travelMs + 500,
+      marker,
+    });
     this.createMuzzleFlash(x, y, angle, COLORS.gravity);
   }
 
@@ -201,31 +240,17 @@ export class RoomScene extends Phaser.Scene {
     }
   }
 
-  private onProjectileHitEnemy(projectile: Phaser.Physics.Arcade.Sprite, enemySprite: Phaser.Physics.Arcade.Sprite): void {
-    const data = this.projectileData.get(projectile);
-    const enemy = this.enemies.find((candidate) => candidate.sprite === enemySprite && candidate.alive);
-    if (!data || !enemy) return;
-    if (data.kind === 'gravity') this.detonateGravity(projectile);
-    else {
-      enemy.takeDamage(data.damage);
-      this.createImpact(projectile.x, projectile.y, COLORS.playerLaser);
-      this.destroyProjectile(projectile);
-    }
-  }
-
-  private onProjectileHitWall(projectile: Phaser.Physics.Arcade.Sprite): void {
-    const data = this.projectileData.get(projectile);
-    if (!data) return;
-    if (data.kind === 'gravity') this.detonateGravity(projectile);
-    else this.destroyProjectile(projectile);
-  }
-
   private detonateGravity(projectile: Phaser.Physics.Arcade.Sprite): void {
-    const data = this.projectileData.get(projectile);
-    if (!data || data.kind !== 'gravity') return;
+    const data = this.gravityProjectileData.get(projectile);
+    if (!data) return;
     const x = projectile.x;
     const y = projectile.y;
-    this.destroyProjectile(projectile);
+    this.gravityProjectileData.delete(projectile);
+    this.tweens.killTweensOf(data.marker);
+    this.tweens.killTweensOf(projectile);
+    data.marker.destroy();
+    this.gravityProjectileGroup?.remove(projectile);
+    projectile.destroy();
     const radius = runState.stats.gravityRadius;
     const ring = this.add.circle(x, y, radius, COLORS.gravity, 0.08)
       .setStrokeStyle(4, COLORS.gravity, 0.8).setDepth(12);
@@ -234,6 +259,26 @@ export class RoomScene extends Phaser.Scene {
     this.gravityFields.push({ x, y, radius, endAt: this.time.now + BASE_STATS.gravityPullMs, ring });
     ring.setData('damage', data.damage);
     playTone('gravity');
+  }
+
+  private updateGravityProjectiles(time: number, delta: number): void {
+    const arrivalDistance = Math.max(14, 430 * delta / 1000 + 4);
+    for (const [projectile, data] of this.gravityProjectileData) {
+      if (!projectile.active) {
+        this.tweens.killTweensOf(data.marker);
+        data.marker.destroy();
+        this.gravityProjectileData.delete(projectile);
+        continue;
+      }
+      const reachedTarget = Phaser.Math.Distance.Between(
+        projectile.x,
+        projectile.y,
+        data.targetX,
+        data.targetY,
+      ) <= arrivalDistance;
+      if (reachedTarget) projectile.setPosition(data.targetX, data.targetY);
+      if (reachedTarget || time >= data.expiresAt) this.detonateGravity(projectile);
+    }
   }
 
   private updateGravityFields(time: number): void {
@@ -328,12 +373,6 @@ export class RoomScene extends Phaser.Scene {
     this.time.delayedCall(500, () => this.scene.start('Result'));
   }
 
-  private destroyProjectile(projectile: Phaser.Physics.Arcade.Sprite): void {
-    if (!this.projectileData.has(projectile)) return;
-    this.projectileData.delete(projectile);
-    projectile.destroy();
-  }
-
   private createWalls(): void {
     const wallData: Array<[number, number, number, number]> = [
       [GAME_WIDTH / 2, 78, GAME_WIDTH - 70, 24],
@@ -346,6 +385,7 @@ export class RoomScene extends Phaser.Scene {
     for (const [x, y, width, height] of wallData) {
       const wall = this.add.rectangle(x, y, width, height, COLORS.wall).setStrokeStyle(2, COLORS.wallEdge);
       this.walls?.add(wall);
+      this.wallRects.push(new Phaser.Geom.Rectangle(x - width / 2, y - height / 2, width, height));
     }
   }
 
@@ -367,9 +407,10 @@ export class RoomScene extends Phaser.Scene {
   private drawProgress(): void {
     const y = GAME_HEIGHT - 11;
     const graphics = this.add.graphics().setDepth(70);
-    const startX = 190;
-    const gap = 116;
-    graphics.lineStyle(3, COLORS.wallEdge, 0.5).lineBetween(startX, y, startX + gap * (RUN_FLOW.length - 1), y);
+    const startX = 120;
+    const endX = GAME_WIDTH - 94;
+    const gap = (endX - startX) / Math.max(1, RUN_FLOW.length - 1);
+    graphics.lineStyle(3, COLORS.wallEdge, 0.5).lineBetween(startX, y, endX, y);
     RUN_FLOW.forEach((stage, index) => {
       const active = index === runState.stageIndex;
       const done = index < runState.stageIndex;
@@ -389,6 +430,10 @@ export class RoomScene extends Phaser.Scene {
     this.add.text(GAME_WIDTH - 18, 18, 'LMB 射击  RMB 格挡反击  1/2 切枪', {
       color: '#9b8d82', fontFamily: 'monospace', fontSize: '11px',
     }).setOrigin(1, 0).setDepth(70);
+    this.blockHud = this.add.text(GAME_WIDTH - 18, GAME_HEIGHT - 58, '格挡就绪  RMB', {
+      color: '#f1dfbd', fontFamily: 'monospace', fontSize: '14px', fontStyle: 'bold',
+      backgroundColor: '#0a0c0edd', padding: { x: 10, y: 7 },
+    }).setOrigin(1, 1).setDepth(72);
   }
 
   private updateHud(): void {
@@ -397,6 +442,17 @@ export class RoomScene extends Phaser.Scene {
     const rage = runState.rageActive ? `  狂暴 ${(runState.rageRemainingMs / 1000).toFixed(1)}s` : runState.ragePending ? '  狂暴 READY' : '';
     const weapon = runState.activeWeapon === 'gravity' ? '重力场枪' : '连发激光枪';
     this.hud.setText(`HP ${Math.ceil(runState.hp)}/${runState.stats.maxHp}  ${markBar}${rage}\n武器 ${weapon}`);
+
+    if (this.player && this.blockHud) {
+      const remaining = this.player.blockCooldownRemainingMs;
+      if (this.player.isBlocking) {
+        this.blockHud.setText('格挡展开').setColor('#fff2cc');
+      } else if (remaining > 0) {
+        this.blockHud.setText(`格挡冷却  ${(remaining / 1000).toFixed(1)}s`).setColor('#e57c59');
+      } else {
+        this.blockHud.setText('格挡就绪  RMB').setColor('#f1dfbd');
+      }
+    }
 
     const boss = this.enemies.find((enemy) => enemy.kind === 'boss' && enemy.alive);
     if (boss && this.bossBar) {
@@ -472,20 +528,62 @@ export class RoomScene extends Phaser.Scene {
     this.time.removeAllEvents();
     this.tweens.killAll();
     for (const enemy of this.enemies) enemy.destroy();
-    for (const projectile of this.projectileData.keys()) projectile.destroy();
+    for (const [projectile, data] of this.gravityProjectileData) {
+      data.marker.destroy();
+      projectile.destroy();
+    }
     for (const shard of this.shards) shard.destroy();
     for (const field of this.gravityFields) field.ring.destroy();
     this.enemies.length = 0;
     this.shards.length = 0;
     this.gravityFields.length = 0;
-    this.projectileData.clear();
+    this.wallRects.length = 0;
+    this.gravityProjectileData.clear();
     this.enemyGroup = undefined;
-    this.projectileGroup = undefined;
+    this.gravityProjectileGroup = undefined;
     this.walls = undefined;
   }
 
   private get livingEnemyCount(): number {
     return this.enemies.filter((enemy) => enemy.alive).length;
+  }
+
+  private rayWallDistance(x: number, y: number, dx: number, dy: number, maximum: number): number {
+    let nearest = maximum;
+    for (const rectangle of this.wallRects) {
+      const distance = this.rayRectangleDistance(x, y, dx, dy, rectangle, maximum);
+      if (distance !== null && distance > 0) nearest = Math.min(nearest, distance);
+    }
+    return nearest;
+  }
+
+  private rayRectangleDistance(
+    x: number,
+    y: number,
+    dx: number,
+    dy: number,
+    rectangle: Phaser.Geom.Rectangle,
+    maximum: number,
+  ): number | null {
+    let minimum = 0;
+    let limit = maximum;
+    const axes: Array<[number, number, number, number]> = [
+      [x, dx, rectangle.left, rectangle.right],
+      [y, dy, rectangle.top, rectangle.bottom],
+    ];
+    for (const [origin, direction, lower, upper] of axes) {
+      if (Math.abs(direction) < 0.00001) {
+        if (origin < lower || origin > upper) return null;
+        continue;
+      }
+      let first = (lower - origin) / direction;
+      let second = (upper - origin) / direction;
+      if (first > second) [first, second] = [second, first];
+      minimum = Math.max(minimum, first);
+      limit = Math.min(limit, second);
+      if (minimum > limit) return null;
+    }
+    return minimum >= 0 ? minimum : limit >= 0 ? limit : null;
   }
 
   private distanceToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {

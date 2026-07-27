@@ -6,7 +6,7 @@ import { playTone } from './Sfx';
 
 export interface PlayerHooks {
   fireLaser: (x: number, y: number, angle: number, damage: number) => void;
-  fireGravity: (x: number, y: number, angle: number, damage: number) => void;
+  fireGravity: (x: number, y: number, targetX: number, targetY: number, damage: number) => void;
   fireCounter: (x: number, y: number, angle: number, damage: number) => void;
   hasLivingTargets: () => boolean;
   onDeath: () => void;
@@ -114,6 +114,14 @@ export class Player {
     return false;
   }
 
+  public get blockCooldownRemainingMs(): number {
+    return Math.max(0, this.blockCooldownUntil - this.scene.time.now);
+  }
+
+  public get isBlocking(): boolean {
+    return this.scene.time.now < this.blockUntil;
+  }
+
   public healFull(): void {
     runState.hp = runState.stats.maxHp;
   }
@@ -139,7 +147,8 @@ export class Player {
     const rageRate = runState.rageActive ? runState.rageFireRateMultiplier : 1;
     const rageDamage = runState.rageActive ? runState.rageDamageMultiplier : 1;
     if (runState.activeWeapon === 'gravity') {
-      this.hooks.fireGravity(this.sprite.x, this.sprite.y, this.aimAngle, stats.gravityDamage * rageDamage);
+      const pointer = this.scene.input.activePointer;
+      this.hooks.fireGravity(this.sprite.x, this.sprite.y, pointer.worldX, pointer.worldY, stats.gravityDamage * rageDamage);
       this.nextShotAt = time + stats.gravityIntervalMs / rageRate;
       playTone('gravity');
     } else {
