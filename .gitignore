@@ -1,0 +1,7 @@
+node_modules/
+dist/
+test-artifacts/
+.playwright-cli/
+.tsc-output.txt
+.smoke-output.txt
+*.log
