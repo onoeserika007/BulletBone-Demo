@@ -5,6 +5,16 @@ export interface ChoiceOption {
   tag?: string;
 }
 
+export interface CombatHudElements {
+  root: HTMLElement;
+  healthFill: HTMLElement;
+  healthValue: HTMLElement;
+  status: HTMLElement;
+  weapons: HTMLElement;
+  roll: HTMLElement;
+  block: HTMLElement;
+}
+
 const root = (): HTMLElement => {
   const element = document.querySelector<HTMLElement>('#overlay-root');
   if (!element) throw new Error('Missing #overlay-root');
@@ -13,6 +23,49 @@ const root = (): HTMLElement => {
 
 export const clearOverlay = (): void => {
   root().replaceChildren();
+};
+
+const combatHudRoot = (): HTMLElement => {
+  const element = document.querySelector<HTMLElement>('#combat-hud-root');
+  if (!element) throw new Error('Missing #combat-hud-root');
+  return element;
+};
+
+export const clearCombatHud = (): void => {
+  combatHudRoot().replaceChildren();
+};
+
+export const createCombatHud = (): CombatHudElements => {
+  const panel = document.createElement('section');
+  panel.className = 'combat-hud';
+  panel.innerHTML = `
+    <div class="combat-vitals">
+      <div class="health-track">
+        <div class="health-fill"></div>
+        <span class="health-value"></span>
+      </div>
+      <div class="combat-status"></div>
+      <div class="combat-weapons"></div>
+    </div>
+    <div class="combat-cooldowns">
+      <div class="cooldown roll-state"></div>
+      <div class="cooldown block-state"></div>
+    </div>`;
+  const query = (selector: string): HTMLElement => {
+    const element = panel.querySelector<HTMLElement>(selector);
+    if (!element) throw new Error(`Missing combat HUD element: ${selector}`);
+    return element;
+  };
+  combatHudRoot().replaceChildren(panel);
+  return {
+    root: panel,
+    healthFill: query('.health-fill'),
+    healthValue: query('.health-value'),
+    status: query('.combat-status'),
+    weapons: query('.combat-weapons'),
+    roll: query('.roll-state'),
+    block: query('.block-state'),
+  };
 };
 
 export const showChoices = (

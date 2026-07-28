@@ -51,7 +51,11 @@ for (let step = 0; step < 80; step += 1) {
     room.player.sprite.setPosition(room.exitPortal.x, room.exitPortal.y);
     return true;
   });
-  if (canExit) await page.keyboard.press('KeyE');
+  if (canExit) {
+    await page.keyboard.down('KeyE');
+    await page.waitForTimeout(50);
+    await page.keyboard.up('KeyE');
+  }
   await page.waitForTimeout(700);
 }
 

@@ -30,7 +30,13 @@ import { playTone } from '../combat/Sfx';
 import { ensureTextures } from '../combat/Textures';
 import { CHIPS, RUN_FLOW, runState } from '../run/RunState';
 import { runRng } from '../run/RunRng';
-import { clearOverlay, showChoices } from '../ui/Overlay';
+import {
+  clearCombatHud,
+  clearOverlay,
+  createCombatHud,
+  showChoices,
+  type CombatHudElements,
+} from '../ui/Overlay';
 
 interface GravityProjectileData {
   damage: number;
@@ -80,10 +86,7 @@ export class RoomScene extends Phaser.Scene {
   private enemyGroup?: Phaser.Physics.Arcade.Group;
   private gravityProjectileGroup?: Phaser.Physics.Arcade.Group;
   private walls?: Phaser.Physics.Arcade.StaticGroup;
-  private hud?: Phaser.GameObjects.Text;
-  private healthBar?: Phaser.GameObjects.Graphics;
-  private blockHud?: Phaser.GameObjects.Text;
-  private rollHud?: Phaser.GameObjects.Text;
+  private combatHud?: CombatHudElements;
   private bossBar?: Phaser.GameObjects.Graphics;
   private exitPortal?: Phaser.GameObjects.Arc;
   private exitLabel?: Phaser.GameObjects.Text;
@@ -104,10 +107,7 @@ export class RoomScene extends Phaser.Scene {
     this.roomClearing = false;
     this.combatActive = false;
     this.player = undefined;
-    this.hud = undefined;
-    this.healthBar = undefined;
-    this.blockHud = undefined;
-    this.rollHud = undefined;
+    this.combatHud = undefined;
     this.bossBar = undefined;
     this.exitPortal = undefined;
     this.exitLabel = undefined;
@@ -123,6 +123,7 @@ export class RoomScene extends Phaser.Scene {
     this.gravityProjectileData.clear();
     ensureTextures(this);
     clearOverlay();
+    clearCombatHud();
     this.cameras.main.resetFX();
     this.cameras.main.setBackgroundColor(runState.stage.theme);
     this.drawBackdrop();
@@ -889,65 +890,43 @@ export class RoomScene extends Phaser.Scene {
   }
 
   private createHud(): void {
-    this.healthBar = this.add.graphics().setDepth(72);
-    this.hud = this.add.text(18, 45, '', {
-      color: '#f4dfba', fontFamily: 'monospace', fontSize: '15px', fontStyle: 'bold',
-      backgroundColor: '#0a0c0ecc', padding: { x: 10, y: 8 },
-    }).setDepth(70);
-    this.add.text(GAME_WIDTH - 18, 18, 'LMB 射击  RMB 格挡  Shift 翻滚  1/2 切枪  G 丢弃  E 交互', {
-      color: '#9b8d82', fontFamily: 'monospace', fontSize: '11px',
-    }).setOrigin(1, 0).setDepth(70);
-    this.rollHud = this.add.text(GAME_WIDTH - 18, GAME_HEIGHT - 96, '翻滚就绪  Shift', {
-      color: '#bce8ff', fontFamily: 'monospace', fontSize: '14px', fontStyle: 'bold',
-      backgroundColor: '#0a0c0edd', padding: { x: 10, y: 7 },
-    }).setOrigin(1, 1).setDepth(72);
-    this.blockHud = this.add.text(GAME_WIDTH - 18, GAME_HEIGHT - 58, '格挡就绪  RMB', {
-      color: '#f1dfbd', fontFamily: 'monospace', fontSize: '14px', fontStyle: 'bold',
-      backgroundColor: '#0a0c0edd', padding: { x: 10, y: 7 },
-    }).setOrigin(1, 1).setDepth(72);
+    this.combatHud = createCombatHud();
   }
 
   private updateHud(): void {
-    if (!this.hud) return;
-    if (this.healthBar) {
-      const healthRatio = Phaser.Math.Clamp(runState.hp / runState.stats.maxHp, 0, 1);
-      this.healthBar.clear();
-      this.healthBar.fillStyle(0x100809, 0.94).fillRoundedRect(18, 15, 254, 25, 7);
-      this.healthBar.fillStyle(COLORS.healthRed, 1).fillRoundedRect(22, 19, 246 * healthRatio, 17, 5);
-      this.healthBar.lineStyle(2, 0xff8b83, 0.9).strokeRoundedRect(18, 15, 254, 25, 7);
-    }
+    if (!this.combatHud) return;
+    const healthRatio = Phaser.Math.Clamp(runState.hp / runState.stats.maxHp, 0, 1);
+    this.combatHud.healthFill.style.width = `${healthRatio * 100}%`;
+    this.combatHud.healthValue.textContent = `HP ${Math.ceil(runState.hp)} / ${runState.stats.maxHp}`;
     const markBar = Array.from({ length: 5 }, (_, index) => index < runState.marks ? '◆' : '◇').join('');
-    const rage = runState.rageActive ? `  狂暴 ${(runState.rageRemainingMs / 1000).toFixed(1)}s` : runState.ragePending ? '  狂暴 READY' : '';
+    const rage = runState.rageActive ? ` · 狂暴 ${(runState.rageRemainingMs / 1000).toFixed(1)}s` : runState.ragePending ? ' · 狂暴 READY' : '';
     const slot1 = runState.equippedWeapons[0] ? WEAPON_DEFINITIONS[runState.equippedWeapons[0].definitionId].name : '空';
     const slot2 = runState.equippedWeapons[1] ? WEAPON_DEFINITIONS[runState.equippedWeapons[1].definitionId].name : '空';
     const activeMarker1 = runState.activeWeaponSlot === 0 ? '▶' : ' ';
     const activeMarker2 = runState.activeWeaponSlot === 1 ? '▶' : ' ';
-    this.hud.setText(
-      `HP ${Math.ceil(runState.hp)}/${runState.stats.maxHp}\n` +
-      `印记 ${markBar}${rage}\n` +
-      `击杀/成功格挡 +1 · 满5自动狂暴 · 狂暴碎片续时\n` +
-      `${activeMarker1}[1] ${slot1}   ${activeMarker2}[2] ${slot2}`,
-    );
+    this.combatHud.status.textContent = `印记 ${markBar}${rage}`;
+    this.combatHud.weapons.textContent = `${activeMarker1}[1] ${slot1}   ${activeMarker2}[2] ${slot2}`;
 
-    if (this.player && this.blockHud) {
-      const remaining = this.player.blockCooldownRemainingMs;
+    if (this.player) {
+      const blockRemaining = this.player.blockCooldownRemainingMs;
+      this.combatHud.block.className = 'cooldown block-state';
       if (this.player.isBlocking) {
-        this.blockHud.setText('格挡展开').setColor('#fff2cc');
-      } else if (remaining > 0) {
-        this.blockHud.setText(`格挡冷却  ${(remaining / 1000).toFixed(1)}s`).setColor('#e57c59');
-      } else {
-        this.blockHud.setText('格挡就绪  RMB').setColor('#f1dfbd');
-      }
-    }
-    if (this.player && this.rollHud) {
-      const remaining = this.player.rollCooldownRemainingMs;
+        this.combatHud.block.textContent = '格挡展开  RMB';
+        this.combatHud.block.classList.add('is-active');
+      } else if (blockRemaining > 0) {
+        this.combatHud.block.textContent = `格挡冷却  ${(blockRemaining / 1000).toFixed(1)}s`;
+        this.combatHud.block.classList.add('is-cooling');
+      } else this.combatHud.block.textContent = '格挡就绪  RMB';
+
+      const rollRemaining = this.player.rollCooldownRemainingMs;
+      this.combatHud.roll.className = 'cooldown roll-state';
       if (this.player.isRolling) {
-        this.rollHud.setText('翻滚闪避').setColor('#ffffff');
-      } else if (remaining > 0) {
-        this.rollHud.setText(`翻滚冷却  ${(remaining / 1000).toFixed(1)}s`).setColor('#63b9d8');
-      } else {
-        this.rollHud.setText('翻滚就绪  Shift').setColor('#bce8ff');
-      }
+        this.combatHud.roll.textContent = '翻滚闪避  Shift';
+        this.combatHud.roll.classList.add('is-active');
+      } else if (rollRemaining > 0) {
+        this.combatHud.roll.textContent = `翻滚冷却  ${(rollRemaining / 1000).toFixed(1)}s`;
+        this.combatHud.roll.classList.add('is-cooling');
+      } else this.combatHud.roll.textContent = '翻滚就绪  Shift';
     }
 
     const boss = this.enemies.find((enemy) => enemy.kind === 'boss' && enemy.alive);
@@ -1021,6 +1000,7 @@ export class RoomScene extends Phaser.Scene {
 
   private shutdown(): void {
     clearOverlay();
+    clearCombatHud();
     this.combatActive = false;
     this.time.removeAllEvents();
     this.tweens.killAll();
