@@ -1,5 +1,9 @@
 export const GAME_WIDTH = 960;
 export const GAME_HEIGHT = 540;
+export const ENEMY_SPAWN_MIN_PLAYER_DISTANCE = 170;
+export const ENEMY_SPAWN_MIN_ENEMY_DISTANCE = 58;
+export const WEAPON_REPLACE_HOLD_MS = 700;
+
 
 export const COLORS = {
   void: 0x090b0d,
@@ -12,6 +16,8 @@ export const COLORS = {
   rust: 0xb64f32,
   enemyLaser: 0xff493d,
   playerLaser: 0x7be4ff,
+  blockBlue: 0x43a9ff,
+  blockBlueBright: 0xbce8ff,
   gravity: 0xa979ff,
   gold: 0xffbd59,
   muted: 0x8e8177,

@@ -1,8 +1,15 @@
 import { BASE_STATS } from '../config/demoConfig';
+import {
+  buildWeaponRuntime,
+  createWeaponInstance,
+  type WeaponId,
+  type WeaponInstance,
+  type WeaponRuntime,
+} from '../config/weaponDefinitions';
 import type { ChoiceOption } from '../ui/Overlay';
 import { runRng } from './RunRng';
 
-export type WeaponId = 'laser' | 'gravity';
+export type { WeaponId, WeaponInstance, WeaponRuntime };
 export type UpgradeId =
   | 'trait-rapid' | 'trait-gravity' | 'trait-guard' | 'trait-rage' | 'trait-survival'
   | 'chip-shell' | 'chip-counter' | 'chip-rage-core' | 'chip-rage-time'
@@ -67,7 +74,7 @@ export const AFFIXES: ChoiceOption[] = [
   { id: 'affix-rage-time', title: '怒火余烬', description: '狂暴基础时间 +1 秒', tag: '狂暴词条' },
 ];
 
-export type StageKind = 'combat' | 'merchant' | 'chest' | 'boss';
+export type StageKind = 'combat' | 'merchant' | 'boss';
 export interface StageDefinition {
   id: string;
   kind: StageKind;
@@ -83,9 +90,8 @@ export const RUN_FLOW: StageDefinition[] = [
   { id: 'combat-2', kind: 'combat', title: '废料巷', subtitle: '别让它们围上来', melee: 5, ranged: 1, theme: 0x201813 },
   { id: 'merchant', kind: 'merchant', title: '废土商人', subtitle: '打够两场，才有资格谈生意', theme: 0x17211e },
   { id: 'combat-3', kind: 'combat', title: '激光走廊', subtitle: '红线出现时，迎着它格挡', melee: 4, ranged: 3, theme: 0x1d1719 },
-  { id: 'combat-4', kind: 'combat', title: '熔炉通道', subtitle: '火力开始升温', melee: 6, ranged: 2, theme: 0x251814 },
-  { id: 'chest', kind: 'chest', title: '军械宝箱', subtitle: '橙色奇点正在苏醒', theme: 0x211d13 },
-  { id: 'combat-5', kind: 'combat', title: '坍缩工场', subtitle: '把它们拽到一起', melee: 7, ranged: 3, theme: 0x181524 },
+  { id: 'combat-4', kind: 'combat', title: '熔炉通道', subtitle: '夺取奇点武器，顶住增援', melee: 10, ranged: 4, theme: 0x251814 },
+  { id: 'combat-5', kind: 'combat', title: '坍缩工场', subtitle: '用重力坍缩撕碎重兵群', melee: 11, ranged: 6, theme: 0x181524 },
   { id: 'combat-6', kind: 'combat', title: '核心防线', subtitle: '用成型 Build 撕开最后一道墙', melee: 5, ranged: 5, theme: 0x20141d },
   { id: 'boss', kind: 'boss', title: '钢铁海盗', subtitle: '接住最后一束光', theme: 0x241513 },
 ];
@@ -97,8 +103,11 @@ class RunState {
   public rageActive = false;
   public ragePending = false;
   public rageRemainingMs = 0;
-  public activeWeapon: WeaponId = 'laser';
-  public readonly weapons = new Set<WeaponId>(['laser']);
+  public activeWeaponSlot = 0;
+  public equippedWeapons: [WeaponInstance, WeaponInstance | null] = [
+    createWeaponInstance('laser', 'blue', ['rapid']),
+    null,
+  ];
   public readonly upgrades = new Set<UpgradeId>();
   public kills = 0;
   public blocks = 0;
@@ -112,9 +121,8 @@ class RunState {
     this.rageActive = false;
     this.ragePending = false;
     this.rageRemainingMs = 0;
-    this.activeWeapon = 'laser';
-    this.weapons.clear();
-    this.weapons.add('laser');
+    this.activeWeaponSlot = 0;
+    this.equippedWeapons = [createWeaponInstance('laser', 'blue', ['rapid']), null];
     this.upgrades.clear();
     this.kills = 0;
     this.blocks = 0;
@@ -129,6 +137,17 @@ class RunState {
 
   public get elapsedSeconds(): number {
     return Math.max(0, (performance.now() - this.startedAt) / 1000);
+  }
+
+  public get activeWeaponInstance(): WeaponInstance {
+    return this.equippedWeapons[this.activeWeaponSlot] ?? this.equippedWeapons[0];
+  }
+
+  public get activeWeaponRuntime(): WeaponRuntime {
+    const modifier = this.modifiers;
+    const id = this.activeWeaponInstance.definitionId;
+    const dedicated = id === 'laser' ? modifier.laserDamage : id === 'gravity' ? modifier.gravityDamage : 0;
+    return buildWeaponRuntime(this.activeWeaponInstance, modifier.damage, modifier.fireRate, dedicated);
   }
 
   public get rageDamageMultiplier(): number {
@@ -168,9 +187,53 @@ class RunState {
     return this.upgrades.has(id);
   }
 
-  public grantGravityGun(): void {
-    this.weapons.add('gravity');
-    this.activeWeapon = 'gravity';
+  public tryPickupWeapon(instance: WeaponInstance): number | null {
+    const emptySlot = this.equippedWeapons.findIndex((weapon) => weapon === null);
+    if (emptySlot < 0) return null;
+    const slot = emptySlot === 1 ? 1 : 0;
+    this.equippedWeapons[slot] = instance;
+    this.activeWeaponSlot = slot;
+    return slot;
+  }
+
+  public equipWeapon(instance: WeaponInstance, preferredSlot?: number): number {
+    const emptySlot = this.equippedWeapons.findIndex((weapon) => weapon === null);
+    const slot = preferredSlot ?? (emptySlot >= 0 ? emptySlot : this.activeWeaponSlot);
+    const normalizedSlot = slot === 1 ? 1 : 0;
+    this.equippedWeapons[normalizedSlot] = instance;
+    this.activeWeaponSlot = normalizedSlot;
+    return normalizedSlot;
+  }
+
+  public replaceActiveWeapon(instance: WeaponInstance): WeaponInstance {
+    const replaced = this.activeWeaponInstance;
+    this.equippedWeapons[this.activeWeaponSlot] = instance;
+    return replaced;
+  }
+
+  public dropActiveWeapon(): WeaponInstance | null {
+    const weaponCount = this.equippedWeapons.filter((weapon) => weapon !== null).length;
+    if (weaponCount <= 1) return null;
+    const dropped = this.equippedWeapons[this.activeWeaponSlot];
+    if (!dropped) return null;
+    this.equippedWeapons[this.activeWeaponSlot] = null;
+    this.activeWeaponSlot = this.equippedWeapons[0] ? 0 : 1;
+    return dropped;
+  }
+
+  public get hasEmptyWeaponSlot(): boolean {
+    return this.equippedWeapons.some((weapon) => weapon === null);
+  }
+
+  public switchWeapon(slot: number): boolean {
+    const normalizedSlot = slot === 1 ? 1 : 0;
+    if (!this.equippedWeapons[normalizedSlot]) return false;
+    this.activeWeaponSlot = normalizedSlot;
+    return true;
+  }
+
+  public hasWeapon(id: WeaponId): boolean {
+    return this.equippedWeapons.some((weapon) => weapon?.definitionId === id);
   }
 
   public gainMark(hasLivingTargets: boolean): boolean {

@@ -48,6 +48,10 @@ export const ensureTextures = (scene: Phaser.Scene): void => {
     g.fillStyle(0xffffff, 0.35).fillRect(0, 0, 30, 8);
     g.fillStyle(COLORS.playerLaser).fillRect(2, 2, 26, 4);
   });
+  generate(scene, 'bullet', 18, 8, (g) => {
+    g.fillStyle(0xffffff, 0.3).fillRoundedRect(0, 0, 18, 8, 4);
+    g.fillStyle(0xffffff).fillRoundedRect(5, 2, 11, 4, 2);
+  });
   generate(scene, 'gravity-orb', 30, 30, (g) => {
     g.fillStyle(0x1a102c).fillCircle(15, 15, 14);
     g.lineStyle(3, COLORS.gravity).strokeCircle(15, 15, 12);
@@ -57,6 +61,12 @@ export const ensureTextures = (scene: Phaser.Scene): void => {
     g.fillStyle(COLORS.boneBright).fillTriangle(12, 0, 23, 14, 12, 30);
     g.fillTriangle(12, 0, 1, 14, 12, 30);
     g.lineStyle(2, COLORS.gold).lineBetween(12, 3, 12, 27);
+  });
+  generate(scene, 'weapon-pickup', 46, 24, (g) => {
+    g.fillStyle(0xffffff).fillRoundedRect(3, 7, 31, 9, 3);
+    g.fillTriangle(34, 8, 45, 12, 34, 15);
+    g.fillRect(10, 15, 8, 7);
+    g.fillStyle(0x15171a).fillCircle(28, 11, 2);
   });
   generate(scene, 'spark', 8, 8, (g) => {
     g.fillStyle(COLORS.boneBright).fillCircle(4, 4, 4);

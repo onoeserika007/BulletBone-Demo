@@ -27,7 +27,7 @@ const blocked = await page.evaluate(() => {
 await page.mouse.up({ button: 'right' });
 if (!blocked) throw new Error('Expected incoming attack to be blocked');
 
-for (let step = 0; step < 40; step += 1) {
+for (let step = 0; step < 80; step += 1) {
   if (await page.locator('.result-grid').isVisible()) break;
   const card = page.locator('.overlay .card').first();
   if (await card.isVisible()) {
@@ -40,7 +40,19 @@ for (let step = 0; step < 40; step += 1) {
     if (!room?.sys.isActive() || !room.enemies) return;
     for (const enemy of room.enemies) if (enemy.alive) enemy.takeDamage(99999);
   });
-  await page.waitForTimeout(1150);
+  await page.waitForTimeout(600);
+  const canExit = await page.evaluate(() => {
+    const room = window.__BULLET_BONE_GAME__.scene.getScene('Room');
+    if (!room?.exitPortal || !room?.player) return false;
+    for (const pickup of room.weaponPickups ?? []) {
+      pickup.sprite.setPosition(100, 430);
+      pickup.label.setPosition(100, 403);
+    }
+    room.player.sprite.setPosition(room.exitPortal.x, room.exitPortal.y);
+    return true;
+  });
+  if (canExit) await page.keyboard.press('KeyE');
+  await page.waitForTimeout(700);
 }
 
 await page.locator('.result-grid').waitFor({ state: 'visible', timeout: 5000 });

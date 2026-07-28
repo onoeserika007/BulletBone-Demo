@@ -1,11 +1,32 @@
 import Phaser from 'phaser';
-import { BASE_STATS, COLORS, DEBUG_KEYS, GAME_HEIGHT, GAME_WIDTH } from '../config/demoConfig';
+import {
+  BASE_STATS,
+  COLORS,
+  DEBUG_KEYS,
+  ENEMY_SPAWN_MIN_ENEMY_DISTANCE,
+  ENEMY_SPAWN_MIN_PLAYER_DISTANCE,
+  GAME_HEIGHT,
+  GAME_WIDTH,
+  WEAPON_REPLACE_HOLD_MS,
+} from '../config/demoConfig';
+import {
+  AFFIX_NAMES,
+  RARITY_COLORS,
+  WEAPON_DEFINITIONS,
+  createWeaponInstance,
+  type WeaponAffixId,
+  type WeaponDefinition,
+  type WeaponInstance,
+  type WeaponRarity,
+  type WeaponRuntime,
+} from '../config/weaponDefinitions';
 import { Enemy, randomSpawnPoint } from '../combat/Enemy';
 import type { IncomingAttack } from '../combat/IncomingAttack';
 import { Player } from '../combat/Player';
 import { playTone } from '../combat/Sfx';
 import { ensureTextures } from '../combat/Textures';
 import { CHIPS, RUN_FLOW, runState } from '../run/RunState';
+import { runRng } from '../run/RunRng';
 import { clearOverlay, showChoices } from '../ui/Overlay';
 
 interface GravityProjectileData {
@@ -24,12 +45,34 @@ interface GravityField {
   ring: Phaser.GameObjects.Arc;
 }
 
+interface BulletProjectile {
+  sprite: Phaser.GameObjects.Image;
+  velocityX: number;
+  velocityY: number;
+  damage: number;
+  penetration: number;
+  color: number;
+  expiresAt: number;
+  hitEnemies: Set<Enemy>;
+}
+
+interface WeaponPickup {
+  sprite: Phaser.GameObjects.Image;
+  label: Phaser.GameObjects.Text;
+  baseLabel: string;
+  instance: WeaponInstance;
+  collecting: boolean;
+  availableAt: number;
+}
+
 export class RoomScene extends Phaser.Scene {
   private player?: Player;
   private readonly enemies: Enemy[] = [];
   private readonly gravityProjectileData = new Map<Phaser.Physics.Arcade.Sprite, GravityProjectileData>();
   private readonly gravityFields: GravityField[] = [];
+  private readonly bulletProjectiles: BulletProjectile[] = [];
   private readonly shards: Phaser.Physics.Arcade.Sprite[] = [];
+  private readonly weaponPickups: WeaponPickup[] = [];
   private readonly wallRects: Phaser.Geom.Rectangle[] = [];
   private enemyGroup?: Phaser.Physics.Arcade.Group;
   private gravityProjectileGroup?: Phaser.Physics.Arcade.Group;
@@ -37,8 +80,15 @@ export class RoomScene extends Phaser.Scene {
   private hud?: Phaser.GameObjects.Text;
   private blockHud?: Phaser.GameObjects.Text;
   private bossBar?: Phaser.GameObjects.Graphics;
+  private exitPortal?: Phaser.GameObjects.Arc;
+  private exitLabel?: Phaser.GameObjects.Text;
+  private interactKey?: Phaser.Input.Keyboard.Key;
   private roomClearing = false;
+  private portalInteracting = false;
   private combatActive = false;
+  private replaceHoldUid?: string;
+  private replaceHoldStartedAt = 0;
+  private replaceHoldConsumed = false;
   private debugKeys?: Record<'reset' | 'rage' | 'boss' | 'pause', Phaser.Input.Keyboard.Key>;
 
   public constructor() {
@@ -52,13 +102,21 @@ export class RoomScene extends Phaser.Scene {
     this.hud = undefined;
     this.blockHud = undefined;
     this.bossBar = undefined;
+    this.exitPortal = undefined;
+    this.exitLabel = undefined;
+    this.interactKey = undefined;
+    this.portalInteracting = false;
+    this.resetReplaceHold();
     this.enemies.length = 0;
     this.shards.length = 0;
+    this.weaponPickups.length = 0;
     this.gravityFields.length = 0;
+    this.bulletProjectiles.length = 0;
     this.wallRects.length = 0;
     this.gravityProjectileData.clear();
     ensureTextures(this);
     clearOverlay();
+    this.cameras.main.resetFX();
     this.cameras.main.setBackgroundColor(runState.stage.theme);
     this.drawBackdrop();
     this.drawProgress();
@@ -72,7 +130,7 @@ export class RoomScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.shutdown, this);
     this.setupDebugKeys();
 
-    if (runState.stage.kind === 'merchant' || runState.stage.kind === 'chest') {
+    if (runState.stage.kind === 'merchant') {
       void this.runNonCombatStage();
       return;
     }
@@ -84,9 +142,12 @@ export class RoomScene extends Phaser.Scene {
     this.gravityProjectileGroup = this.physics.add.group();
 
     this.player = new Player(this, {
-      fireLaser: (x, y, angle, damage) => this.fireLaser(x, y, angle, damage),
-      fireGravity: (x, y, targetX, targetY, damage) => this.fireGravity(x, y, targetX, targetY, damage),
+      fireWeapon: (runtime, x, y, angle, targetX, targetY, damageMultiplier) => {
+        this.fireWeapon(runtime, x, y, angle, targetX, targetY, damageMultiplier);
+      },
       fireCounter: (x, y, angle, damage) => this.fireCounter(x, y, angle, damage),
+      dropWeapon: (instance, x, y) => this.spawnWeaponPickup(instance, x + 46, y, 700),
+      showMessage: (message) => this.showMessage(message),
       hasLivingTargets: () => this.livingEnemyCount > 0,
       onDeath: () => this.onPlayerDeath(),
     });
@@ -100,6 +161,14 @@ export class RoomScene extends Phaser.Scene {
     });
 
     this.createHud();
+    if (runState.stage.id === 'combat-4' && !runState.hasWeapon('gravity')) {
+      this.spawnWeaponPickup(
+        createWeaponInstance('gravity', 'orange', ['calibrated', 'rapid']),
+        this.player.sprite.x + 78,
+        this.player.sprite.y - 20,
+      );
+      this.showMessage('重力坍缩枪已掉落 · 靠近后按 E 拾取或长按 E 替换');
+    }
     if (runState.stage.kind === 'boss') this.spawnBoss();
     else this.spawnWave(runState.stage.melee ?? 0, runState.stage.ranged ?? 0);
 
@@ -111,34 +180,59 @@ export class RoomScene extends Phaser.Scene {
     if (!this.combatActive || !this.player) return;
     this.player.update(time, delta);
     for (const enemy of this.enemies) enemy.update(time);
+    this.updateBulletProjectiles(time, delta);
     this.updateGravityProjectiles(time, delta);
     this.updateGravityFields(time);
     this.updateShards();
+    const pickupNearby = this.updateWeaponPickups();
+    this.updateExitPortal(pickupNearby);
     this.updateHud();
     this.handleDebugInput();
   }
 
   private async runNonCombatStage(): Promise<void> {
-    if (runState.stage.kind === 'merchant') {
-      const options = runState.sampleChips();
-      const id = await showChoices('废土商人', '骨匠咧嘴一笑：“第一枚芯片免费。”', options.length ? options : CHIPS.slice(0, 3));
-      if (!this.sys.isActive()) return;
-      runState.applyUpgrade(id);
-    } else {
-      await showChoices('橙色军械箱', '奇点在枪膛里低鸣。重力场枪已加入武器栏。', [{
-        id: 'gravity', title: '重力场枪 · 重力过载', description: '低射速重力炸弹，命中后牵引并坍缩爆炸。按 2 切换。', tag: '固定橙色武器',
-      }]);
-      if (!this.sys.isActive()) return;
-      runState.grantGravityGun();
-    }
+    const options = runState.sampleChips();
+    const id = await showChoices('废土商人', '骨匠咧嘴一笑：“第一枚芯片免费。”', options.length ? options : CHIPS.slice(0, 3));
+    if (!this.sys.isActive()) return;
+    runState.applyUpgrade(id);
     this.advanceStage();
   }
 
   private spawnWave(melee: number, ranged: number): void {
     const total = melee + ranged;
     for (let index = 0; index < total; index += 1) {
-      this.spawnEnemy(index < melee ? 'melee' : 'ranged', randomSpawnPoint(index, total));
+      const point = this.findSafeEnemySpawnPoint(index, total);
+      this.spawnEnemy(index < melee ? 'melee' : 'ranged', point);
     }
+  }
+
+  private findSafeEnemySpawnPoint(index: number, total: number): Phaser.Math.Vector2 {
+    let fallback = new Phaser.Math.Vector2(96, 126);
+    let bestSpacing = -1;
+    for (let attempt = 0; attempt < 48; attempt += 1) {
+      const rotatedIndex = index + attempt * total * 0.381966;
+      const candidate = randomSpawnPoint(rotatedIndex, total);
+      const playerDistance = this.player
+        ? Phaser.Math.Distance.Between(candidate.x, candidate.y, this.player.sprite.x, this.player.sprite.y)
+        : Number.POSITIVE_INFINITY;
+      const nearWall = this.wallRects.some((wall) => (
+        candidate.x >= wall.left - 28
+        && candidate.x <= wall.right + 28
+        && candidate.y >= wall.top - 28
+        && candidate.y <= wall.bottom + 28
+      ));
+      if (playerDistance < ENEMY_SPAWN_MIN_PLAYER_DISTANCE || nearWall) continue;
+      const enemySpacing = this.enemies.reduce((nearest, enemy) => Math.min(
+        nearest,
+        Phaser.Math.Distance.Between(candidate.x, candidate.y, enemy.sprite.x, enemy.sprite.y),
+      ), Number.POSITIVE_INFINITY);
+      if (enemySpacing > bestSpacing) {
+        bestSpacing = enemySpacing;
+        fallback = candidate;
+      }
+      if (enemySpacing >= ENEMY_SPAWN_MIN_ENEMY_DISTANCE) return candidate;
+    }
+    return fallback;
   }
 
   private spawnBoss(): void {
@@ -162,44 +256,190 @@ export class RoomScene extends Phaser.Scene {
     this.player?.resolveIncoming(attack);
   }
 
-  private fireLaser(x: number, y: number, angle: number, damage: number): void {
+  private fireWeapon(
+    runtime: WeaponRuntime,
+    x: number,
+    y: number,
+    angle: number,
+    targetX: number,
+    targetY: number,
+    damageMultiplier: number,
+  ): void {
+    if (runtime.definition.fireMode === 'gravity') {
+      this.fireGravity(x, y, targetX, targetY, runtime.damage * damageMultiplier);
+      return;
+    }
+    const pelletCount = runtime.pellets;
+    for (let pellet = 0; pellet < pelletCount; pellet += 1) {
+      const centeredIndex = pellet - (pelletCount - 1) / 2;
+      const spreadStep = pelletCount > 1 ? runtime.spreadDeg / Math.max(1, pelletCount - 1) : 0;
+      const deterministicSpread = centeredIndex * spreadStep;
+      const jitter = pelletCount === 1 ? Phaser.Math.FloatBetween(-runtime.spreadDeg, runtime.spreadDeg) : 0;
+      const shotAngle = angle + Phaser.Math.DegToRad(deterministicSpread + jitter);
+      if (runtime.definition.fireMode === 'hitscan') {
+        this.fireHitscan(
+          x,
+          y,
+          shotAngle,
+          runtime.damage * damageMultiplier,
+          runtime.penetration,
+          runtime.color,
+        );
+      } else {
+        this.spawnBulletProjectile(
+          x,
+          y,
+          shotAngle,
+          runtime.projectileSpeed,
+          runtime.damage * damageMultiplier,
+          runtime.penetration,
+          runtime.color,
+        );
+      }
+    }
+    this.createMuzzleFlash(x, y, angle, runtime.color);
+  }
+
+  private spawnBulletProjectile(
+    x: number,
+    y: number,
+    angle: number,
+    speed: number,
+    damage: number,
+    penetration: number,
+    color: number,
+  ): void {
+    const startX = x + Math.cos(angle) * 32;
+    const startY = y + Math.sin(angle) * 32;
+    const sprite = this.add.image(startX, startY, 'bullet')
+      .setTint(color).setRotation(angle).setDepth(18);
+    this.bulletProjectiles.push({
+      sprite,
+      velocityX: Math.cos(angle) * speed,
+      velocityY: Math.sin(angle) * speed,
+      damage,
+      penetration,
+      color,
+      expiresAt: this.time.now + 2800,
+      hitEnemies: new Set<Enemy>(),
+    });
+  }
+
+  private updateBulletProjectiles(time: number, delta: number): void {
+    const deltaSeconds = Math.min(delta, 50) / 1000;
+    for (let index = this.bulletProjectiles.length - 1; index >= 0; index -= 1) {
+      const projectile = this.bulletProjectiles[index];
+      if (!projectile.sprite.active || time >= projectile.expiresAt) {
+        this.destroyBulletProjectile(index);
+        continue;
+      }
+      const startX = projectile.sprite.x;
+      const startY = projectile.sprite.y;
+      const stepX = projectile.velocityX * deltaSeconds;
+      const stepY = projectile.velocityY * deltaSeconds;
+      const distance = Math.hypot(stepX, stepY);
+      if (distance <= 0) continue;
+      const directionX = stepX / distance;
+      const directionY = stepY / distance;
+      const wallDistance = this.rayWallDistance(startX, startY, directionX, directionY, distance);
+      const hits: Array<{ enemy: Enemy; distance: number }> = [];
+
+      for (const enemy of this.enemies) {
+        if (!enemy.alive || projectile.hitEnemies.has(enemy)) continue;
+        const offsetX = enemy.sprite.x - startX;
+        const offsetY = enemy.sprite.y - startY;
+        const projection = offsetX * directionX + offsetY * directionY;
+        if (projection <= 0 || projection > wallDistance) continue;
+        const perpendicular = Math.abs(offsetX * directionY - offsetY * directionX);
+        const hitRadius = enemy.kind === 'boss' ? 49 : 25;
+        if (perpendicular <= hitRadius) hits.push({ enemy, distance: projection });
+      }
+      hits.sort((left, right) => left.distance - right.distance);
+
+      let destroyed = false;
+      for (const hit of hits) {
+        projectile.hitEnemies.add(hit.enemy);
+        hit.enemy.takeDamage(projectile.damage);
+        const hitX = startX + directionX * hit.distance;
+        const hitY = startY + directionY * hit.distance;
+        this.createImpact(hitX, hitY, projectile.color);
+        if (projectile.penetration <= 0) {
+          projectile.sprite.setPosition(hitX, hitY);
+          this.destroyBulletProjectile(index);
+          destroyed = true;
+          break;
+        }
+        projectile.penetration -= 1;
+      }
+      if (destroyed) continue;
+
+      if (wallDistance < distance - 0.01) {
+        projectile.sprite.setPosition(
+          startX + directionX * wallDistance,
+          startY + directionY * wallDistance,
+        );
+        this.createImpact(projectile.sprite.x, projectile.sprite.y, projectile.color, 4);
+        this.destroyBulletProjectile(index);
+        continue;
+      }
+      projectile.sprite.setPosition(startX + stepX, startY + stepY);
+    }
+  }
+
+  private destroyBulletProjectile(index: number): void {
+    const projectile = this.bulletProjectiles[index];
+    if (!projectile) return;
+    projectile.sprite.destroy();
+    this.bulletProjectiles.splice(index, 1);
+  }
+
+  private fireHitscan(
+    x: number,
+    y: number,
+    angle: number,
+    damage: number,
+    penetration: number,
+    color: number,
+  ): void {
     const startX = x + Math.cos(angle) * 30;
     const startY = y + Math.sin(angle) * 30;
     const directionX = Math.cos(angle);
     const directionY = Math.sin(angle);
-    let hitDistance = this.rayWallDistance(startX, startY, directionX, directionY, 2200);
-    let hitEnemy: Enemy | undefined;
+    const wallDistance = this.rayWallDistance(startX, startY, directionX, directionY, 2200);
+    const candidates: Array<{ enemy: Enemy; distance: number }> = [];
 
     for (const enemy of this.enemies) {
       if (!enemy.alive) continue;
       const offsetX = enemy.sprite.x - startX;
       const offsetY = enemy.sprite.y - startY;
       const projection = offsetX * directionX + offsetY * directionY;
-      if (projection <= 0 || projection >= hitDistance) continue;
+      if (projection <= 0 || projection >= wallDistance) continue;
       const perpendicular = Math.abs(offsetX * directionY - offsetY * directionX);
       const hitRadius = enemy.kind === 'boss' ? 46 : 22;
-      if (perpendicular <= hitRadius) {
-        hitDistance = projection;
-        hitEnemy = enemy;
-      }
+      if (perpendicular <= hitRadius) candidates.push({ enemy, distance: projection });
     }
-
-    const endX = startX + directionX * hitDistance;
-    const endY = startY + directionY * hitDistance;
+    candidates.sort((left, right) => left.distance - right.distance);
+    const hits = candidates.slice(0, 1 + penetration);
+    const endDistance = hits.length > penetration ? hits[hits.length - 1].distance : wallDistance;
+    const endX = startX + directionX * endDistance;
+    const endY = startY + directionY * endDistance;
     const beam = this.add.graphics().setDepth(17);
-    beam.lineStyle(runState.rageActive ? 9 : 6, 0xffffff, 0.2).lineBetween(startX, startY, endX, endY);
-    beam.lineStyle(runState.rageActive ? 4 : 3, COLORS.playerLaser, 0.95).lineBetween(startX, startY, endX, endY);
+    beam.lineStyle(runState.rageActive ? 8 : 5, 0xffffff, 0.18).lineBetween(startX, startY, endX, endY);
+    beam.lineStyle(runState.rageActive ? 4 : 3, color, 0.95).lineBetween(startX, startY, endX, endY);
     this.tweens.add({ targets: beam, alpha: 0, duration: 75, onComplete: () => beam.destroy() });
 
-    if (hitEnemy) {
-      hitEnemy.takeDamage(damage);
-      this.createImpact(endX, endY, COLORS.playerLaser);
-    }
-    this.createMuzzleFlash(x, y, angle, COLORS.playerLaser);
+    hits.forEach((hit, index) => {
+      hit.enemy.takeDamage(damage * Math.max(0.55, 1 - index * 0.2));
+      this.createImpact(
+        startX + directionX * hit.distance,
+        startY + directionY * hit.distance,
+        color,
+      );
+    });
   }
 
   private fireGravity(x: number, y: number, targetX: number, targetY: number, damage: number): void {
-    if (!runState.weapons.has('gravity') || !this.gravityProjectileGroup) return;
+    if (!runState.hasWeapon('gravity') || !this.gravityProjectileGroup) return;
     const landingX = Phaser.Math.Clamp(targetX, 62, GAME_WIDTH - 62);
     const landingY = Phaser.Math.Clamp(targetY, 100, GAME_HEIGHT - 62);
     const angle = Phaser.Math.Angle.Between(x, y, landingX, landingY);
@@ -231,8 +471,9 @@ export class RoomScene extends Phaser.Scene {
     const x2 = x + Math.cos(angle) * 1100;
     const y2 = y + Math.sin(angle) * 1100;
     const beam = this.add.graphics().setDepth(25);
-    beam.lineStyle(10, COLORS.boneBright, 0.9).lineBetween(x, y, x2, y2);
-    this.tweens.add({ targets: beam, alpha: 0, duration: 130, onComplete: () => beam.destroy() });
+    beam.lineStyle(14, COLORS.blockBlue, 0.35).lineBetween(x, y, x2, y2);
+    beam.lineStyle(7, COLORS.blockBlueBright, 0.95).lineBetween(x, y, x2, y2);
+    this.tweens.add({ targets: beam, alpha: 0, duration: 150, onComplete: () => beam.destroy() });
     for (const enemy of this.enemies) {
       if (enemy.alive && this.distanceToSegment(enemy.sprite.x, enemy.sprite.y, x, y, x2, y2) < 38) {
         enemy.takeDamage(damage);
@@ -309,6 +550,7 @@ export class RoomScene extends Phaser.Scene {
     runState.kills += 1;
     if (runState.rageActive) this.spawnShard(enemy.sprite.x, enemy.sprite.y);
     else runState.gainMark(this.livingEnemyCount > 0);
+    if (enemy.kind !== 'boss') this.tryDropWeapon(enemy);
 
     if (enemy.kind === 'boss') {
       this.combatActive = false;
@@ -317,8 +559,146 @@ export class RoomScene extends Phaser.Scene {
     }
     if (this.livingEnemyCount === 0 && !this.roomClearing) {
       this.roomClearing = true;
-      this.time.delayedCall(1000, () => void this.completeCombatRoom());
+      this.time.delayedCall(450, () => this.spawnExitPortal());
     }
+  }
+
+  private tryDropWeapon(enemy: Enemy): void {
+    const chance = enemy.kind === 'ranged' ? 0.22 : 0.14;
+    if (runRng.next() > chance) return;
+    const definitions = Object.values(WEAPON_DEFINITIONS).filter((definition) => definition.dropWeight > 0);
+    const totalWeight = definitions.reduce((total, definition) => total + definition.dropWeight, 0);
+    let roll = runRng.next() * totalWeight;
+    let definition: WeaponDefinition = definitions[0];
+    for (const candidate of definitions) {
+      roll -= candidate.dropWeight;
+      if (roll <= 0) {
+        definition = candidate;
+        break;
+      }
+    }
+
+    const rarityRoll = runRng.next();
+    const rarity: WeaponRarity = rarityRoll < 0.07 ? 'orange' : rarityRoll < 0.35 ? 'blue' : 'white';
+    const affixCount = rarity === 'orange' ? 2 : rarity === 'blue' ? 1 : 0;
+    const affixPool: WeaponAffixId[] = ['calibrated', 'rapid', 'twin-shot', 'piercing'];
+    const affixes = runRng.sample(affixPool, affixCount);
+    this.spawnWeaponPickup(
+      createWeaponInstance(definition.id, rarity, affixes),
+      enemy.sprite.x,
+      enemy.sprite.y,
+    );
+  }
+
+  private spawnWeaponPickup(instance: WeaponInstance, x: number, y: number, pickupDelayMs = 0): void {
+    const definition = WEAPON_DEFINITIONS[instance.definitionId];
+    const dropX = Phaser.Math.Clamp(x, 62, GAME_WIDTH - 62);
+    const dropY = Phaser.Math.Clamp(y, 108, GAME_HEIGHT - 62);
+    const sprite = this.add.image(dropX, dropY, 'weapon-pickup')
+      .setTint(RARITY_COLORS[instance.rarity]).setDepth(18);
+    const affixText = instance.affixes.map((id) => AFFIX_NAMES[id]).join(' · ');
+    const baseLabel = `${definition.name}${affixText ? ` [${affixText}]` : ''}`;
+    const label = this.add.text(dropX, dropY - 27, baseLabel, {
+      color: `#${RARITY_COLORS[instance.rarity].toString(16).padStart(6, '0')}`,
+      fontFamily: 'monospace', fontSize: '11px', fontStyle: 'bold',
+      backgroundColor: '#090b0dcc', padding: { x: 4, y: 2 },
+    }).setOrigin(0.5).setDepth(19);
+    this.tweens.add({ targets: [sprite, label], y: '-=6', yoyo: true, repeat: -1, duration: 420 });
+    this.weaponPickups.push({
+      sprite,
+      label,
+      baseLabel,
+      instance,
+      collecting: false,
+      availableAt: this.time.now + pickupDelayMs,
+    });
+  }
+
+  private updateWeaponPickups(): boolean {
+    if (!this.player) return false;
+    if (!this.interactKey?.isDown && (this.replaceHoldUid || this.replaceHoldConsumed)) this.resetReplaceHold();
+    let nearestIndex = -1;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < this.weaponPickups.length; index += 1) {
+      const pickup = this.weaponPickups[index];
+      if (pickup.collecting || !pickup.sprite.active) continue;
+      const distance = Phaser.Math.Distance.Between(
+        pickup.sprite.x,
+        pickup.sprite.y,
+        this.player.sprite.x,
+        this.player.sprite.y,
+      );
+      pickup.label.setText(pickup.baseLabel);
+      if (distance <= 58 && distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    }
+    if (nearestIndex < 0) return false;
+
+    const pickup = this.weaponPickups[nearestIndex];
+    if (this.time.now < pickup.availableAt) {
+      pickup.label.setText(`${pickup.baseLabel}\n刚刚丢弃`);
+      return true;
+    }
+
+    let slot: number | null = null;
+    let replacedWeapon: WeaponInstance | null = null;
+    if (runState.hasEmptyWeaponSlot) {
+      pickup.label.setText(`${pickup.baseLabel}\n[E] 拾取`);
+      if (!this.interactKey || !Phaser.Input.Keyboard.JustDown(this.interactKey)) return true;
+      slot = runState.tryPickupWeapon(pickup.instance);
+    } else {
+      if (!this.interactKey?.isDown) {
+        pickup.label.setText(`${pickup.baseLabel}\n长按 E 替换当前武器`);
+        return true;
+      }
+      if (this.replaceHoldConsumed) {
+        pickup.label.setText(`${pickup.baseLabel}\n松开 E 后可再次替换`);
+        return true;
+      }
+      if (this.replaceHoldUid !== pickup.instance.uid) {
+        this.replaceHoldUid = pickup.instance.uid;
+        this.replaceHoldStartedAt = this.time.now;
+      }
+      const progress = Phaser.Math.Clamp(
+        (this.time.now - this.replaceHoldStartedAt) / WEAPON_REPLACE_HOLD_MS,
+        0,
+        1,
+      );
+      const filled = Math.floor(progress * 8);
+      pickup.label.setText(`${pickup.baseLabel}\n长按 E 替换 [${'■'.repeat(filled)}${'□'.repeat(8 - filled)}]`);
+      if (progress < 1) return true;
+      replacedWeapon = runState.replaceActiveWeapon(pickup.instance);
+      slot = runState.activeWeaponSlot;
+      this.replaceHoldConsumed = true;
+    }
+
+    if (slot === null) return true;
+    pickup.collecting = true;
+    const dropX = pickup.sprite.x;
+    const dropY = pickup.sprite.y;
+    const runtime = runState.activeWeaponRuntime;
+    const action = replacedWeapon ? '替换为' : '拾取';
+    const notice = this.add.text(GAME_WIDTH / 2, 92, `${action} ${runtime.displayName}  →  槽位 ${slot + 1}`, {
+      color: '#fff1ce', fontFamily: 'monospace', fontSize: '18px', fontStyle: 'bold',
+      backgroundColor: '#111316ee', padding: { x: 12, y: 7 },
+    }).setOrigin(0.5).setDepth(90);
+    this.tweens.add({ targets: notice, y: 72, alpha: 0, duration: 1100, onComplete: () => notice.destroy() });
+    this.tweens.killTweensOf(pickup.sprite);
+    this.tweens.killTweensOf(pickup.label);
+    pickup.sprite.destroy();
+    pickup.label.destroy();
+    this.weaponPickups.splice(nearestIndex, 1);
+    if (replacedWeapon) this.spawnWeaponPickup(replacedWeapon, dropX, dropY, 700);
+    playTone('pickup');
+    return true;
+  }
+
+  private resetReplaceHold(): void {
+    this.replaceHoldUid = undefined;
+    this.replaceHoldStartedAt = 0;
+    this.replaceHoldConsumed = false;
   }
 
   private spawnShard(x: number, y: number): void {
@@ -338,11 +718,7 @@ export class RoomScene extends Phaser.Scene {
         continue;
       }
       const distance = Phaser.Math.Distance.Between(shard.x, shard.y, this.player.sprite.x, this.player.sprite.y);
-      const magnetRange = this.roomClearing ? 1000 : 145;
-      if (distance < magnetRange) {
-        const direction = new Phaser.Math.Vector2(this.player.sprite.x - shard.x, this.player.sprite.y - shard.y).normalize();
-        shard.setVelocity(direction.x * (this.roomClearing ? 620 : 320), direction.y * (this.roomClearing ? 620 : 320));
-      }
+      shard.setVelocity(0);
       if (distance < 28) {
         runState.extendRage();
         playTone('pickup');
@@ -350,6 +726,58 @@ export class RoomScene extends Phaser.Scene {
         this.shards.splice(index, 1);
       }
     }
+  }
+
+  private spawnExitPortal(): void {
+    if (this.exitPortal || !this.sys.isActive()) return;
+    const x = GAME_WIDTH / 2;
+    const y = 122;
+    this.exitPortal = this.add.circle(x, y, 20, COLORS.boneBright, 0.22)
+      .setStrokeStyle(4, COLORS.gold, 0.95).setDepth(24);
+    this.exitLabel = this.add.text(x, y - 37, '出口光点', {
+      color: '#ffe1a3', fontFamily: 'monospace', fontSize: '13px', fontStyle: 'bold',
+      backgroundColor: '#090b0dcc', padding: { x: 6, y: 3 },
+    }).setOrigin(0.5).setDepth(25);
+    this.tweens.add({
+      targets: this.exitPortal,
+      scale: 1.65,
+      alpha: 0.48,
+      yoyo: true,
+      repeat: -1,
+      duration: 620,
+    });
+    this.showMessage('房间已清空 · 前往光点按 E 离开');
+  }
+
+  private updateExitPortal(pickupNearby: boolean): void {
+    if (!this.player || !this.exitPortal || !this.exitLabel || this.portalInteracting) return;
+    const distance = Phaser.Math.Distance.Between(
+      this.player.sprite.x,
+      this.player.sprite.y,
+      this.exitPortal.x,
+      this.exitPortal.y,
+    );
+    const nearby = distance <= 72;
+    this.exitLabel.setText(nearby ? '按 E 离开关卡' : '出口光点');
+    this.exitLabel.setColor(nearby ? '#ffffff' : '#ffe1a3');
+    if (nearby && !pickupNearby && this.interactKey && Phaser.Input.Keyboard.JustDown(this.interactKey)) {
+      this.portalInteracting = true;
+      void this.completeCombatRoom();
+    }
+  }
+
+  private showMessage(message: string): void {
+    const notice = this.add.text(GAME_WIDTH / 2, 96, message, {
+      color: '#fff1ce', fontFamily: 'monospace', fontSize: '16px', fontStyle: 'bold',
+      backgroundColor: '#111316ee', padding: { x: 12, y: 7 },
+    }).setOrigin(0.5).setDepth(95);
+    this.tweens.add({
+      targets: notice,
+      y: 76,
+      alpha: 0,
+      duration: 1300,
+      onComplete: () => notice.destroy(),
+    });
   }
 
   private async completeCombatRoom(): Promise<void> {
@@ -416,7 +844,7 @@ export class RoomScene extends Phaser.Scene {
       const done = index < runState.stageIndex;
       graphics.fillStyle(active ? COLORS.gold : done ? COLORS.bone : COLORS.muted, active ? 1 : 0.7)
         .fillCircle(startX + index * gap, y, active ? 7 : 5);
-      this.add.text(startX + index * gap, y - 18, stage.kind === 'combat' ? '战' : stage.kind === 'merchant' ? '商' : stage.kind === 'chest' ? '箱' : '王', {
+      this.add.text(startX + index * gap, y - 18, stage.kind === 'combat' ? '战' : stage.kind === 'merchant' ? '商' : '王', {
         color: active ? '#ffcf80' : '#897b71', fontFamily: 'monospace', fontSize: '10px',
       }).setOrigin(0.5).setDepth(70);
     });
@@ -427,7 +855,7 @@ export class RoomScene extends Phaser.Scene {
       color: '#f4dfba', fontFamily: 'monospace', fontSize: '15px', fontStyle: 'bold',
       backgroundColor: '#0a0c0ecc', padding: { x: 10, y: 8 },
     }).setDepth(70);
-    this.add.text(GAME_WIDTH - 18, 18, 'LMB 射击  RMB 格挡反击  1/2 切枪', {
+    this.add.text(GAME_WIDTH - 18, 18, 'LMB 射击  RMB 格挡  1/2 切枪  G 丢弃  E 交互', {
       color: '#9b8d82', fontFamily: 'monospace', fontSize: '11px',
     }).setOrigin(1, 0).setDepth(70);
     this.blockHud = this.add.text(GAME_WIDTH - 18, GAME_HEIGHT - 58, '格挡就绪  RMB', {
@@ -440,8 +868,16 @@ export class RoomScene extends Phaser.Scene {
     if (!this.hud) return;
     const markBar = Array.from({ length: 5 }, (_, index) => index < runState.marks ? '◆' : '◇').join('');
     const rage = runState.rageActive ? `  狂暴 ${(runState.rageRemainingMs / 1000).toFixed(1)}s` : runState.ragePending ? '  狂暴 READY' : '';
-    const weapon = runState.activeWeapon === 'gravity' ? '重力场枪' : '连发激光枪';
-    this.hud.setText(`HP ${Math.ceil(runState.hp)}/${runState.stats.maxHp}  ${markBar}${rage}\n武器 ${weapon}`);
+    const slot1 = runState.equippedWeapons[0] ? WEAPON_DEFINITIONS[runState.equippedWeapons[0].definitionId].name : '空';
+    const slot2 = runState.equippedWeapons[1] ? WEAPON_DEFINITIONS[runState.equippedWeapons[1].definitionId].name : '空';
+    const activeMarker1 = runState.activeWeaponSlot === 0 ? '▶' : ' ';
+    const activeMarker2 = runState.activeWeaponSlot === 1 ? '▶' : ' ';
+    this.hud.setText(
+      `HP ${Math.ceil(runState.hp)}/${runState.stats.maxHp}\n` +
+      `印记 ${markBar}${rage}\n` +
+      `击杀/成功格挡 +1 · 满5自动狂暴 · 狂暴碎片续时\n` +
+      `${activeMarker1}[1] ${slot1}   ${activeMarker2}[2] ${slot2}`,
+    );
 
     if (this.player && this.blockHud) {
       const remaining = this.player.blockCooldownRemainingMs;
@@ -493,6 +929,7 @@ export class RoomScene extends Phaser.Scene {
   private setupDebugKeys(): void {
     const keyboard = this.input.keyboard;
     if (!keyboard) return;
+    this.interactKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E);
     this.debugKeys = {
       reset: keyboard.addKey(DEBUG_KEYS.resetRoom),
       rage: keyboard.addKey(DEBUG_KEYS.forceRage),
@@ -532,11 +969,20 @@ export class RoomScene extends Phaser.Scene {
       data.marker.destroy();
       projectile.destroy();
     }
+    for (const projectile of this.bulletProjectiles) projectile.sprite.destroy();
     for (const shard of this.shards) shard.destroy();
+    for (const pickup of this.weaponPickups) {
+      pickup.sprite.destroy();
+      pickup.label.destroy();
+    }
+    this.exitPortal?.destroy();
+    this.exitLabel?.destroy();
     for (const field of this.gravityFields) field.ring.destroy();
     this.enemies.length = 0;
     this.shards.length = 0;
+    this.weaponPickups.length = 0;
     this.gravityFields.length = 0;
+    this.bulletProjectiles.length = 0;
     this.wallRects.length = 0;
     this.gravityProjectileData.clear();
     this.enemyGroup = undefined;
