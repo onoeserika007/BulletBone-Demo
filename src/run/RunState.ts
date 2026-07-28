@@ -74,7 +74,7 @@ export const AFFIXES: ChoiceOption[] = [
   { id: 'affix-rage-time', title: '怒火余烬', description: '狂暴基础时间 +1 秒', tag: '狂暴词条' },
 ];
 
-export type StageKind = 'combat' | 'merchant' | 'boss';
+export type StageKind = 'combat' | 'merchant' | 'rest' | 'boss';
 export interface StageDefinition {
   id: string;
   kind: StageKind;
@@ -88,11 +88,14 @@ export interface StageDefinition {
 export const RUN_FLOW: StageDefinition[] = [
   { id: 'combat-1', kind: 'combat', title: '外围入口', subtitle: '先让枪开口', melee: 6, ranged: 0, theme: 0x211a17 },
   { id: 'combat-2', kind: 'combat', title: '废料巷', subtitle: '别让它们围上来', melee: 5, ranged: 1, theme: 0x201813 },
-  { id: 'merchant', kind: 'merchant', title: '废土商人', subtitle: '打够两场，才有资格谈生意', theme: 0x17211e },
+  { id: 'merchant-1', kind: 'merchant', title: '废土商店', subtitle: '补充一枚免费芯片再出发', theme: 0x17211e },
   { id: 'combat-3', kind: 'combat', title: '激光走廊', subtitle: '红线出现时，迎着它格挡', melee: 4, ranged: 3, theme: 0x1d1719 },
+  { id: 'rest-1', kind: 'rest', title: '骨火营地', subtitle: '在下一轮猛攻前重组骨架', theme: 0x152025 },
   { id: 'combat-4', kind: 'combat', title: '熔炉通道', subtitle: '夺取奇点武器，顶住增援', melee: 10, ranged: 4, theme: 0x251814 },
   { id: 'combat-5', kind: 'combat', title: '坍缩工场', subtitle: '用重力坍缩撕碎重兵群', melee: 11, ranged: 6, theme: 0x181524 },
+  { id: 'merchant-2', kind: 'merchant', title: '前线黑市', subtitle: '最后一次整备机会', theme: 0x17211e },
   { id: 'combat-6', kind: 'combat', title: '核心防线', subtitle: '用成型 Build 撕开最后一道墙', melee: 5, ranged: 5, theme: 0x20141d },
+  { id: 'rest-2', kind: 'rest', title: '寂静篝火', subtitle: '修复伤势，准备迎战钢铁海盗', theme: 0x151d24 },
   { id: 'boss', kind: 'boss', title: '钢铁海盗', subtitle: '接住最后一束光', theme: 0x241513 },
 ];
 
@@ -181,6 +184,10 @@ class RunState {
     const oldMaxHp = this.stats.maxHp;
     this.upgrades.add(id);
     this.hp = Math.min(this.stats.maxHp, this.hp + Math.max(0, this.stats.maxHp - oldMaxHp));
+  }
+
+  public healFull(): void {
+    this.hp = this.stats.maxHp;
   }
 
   public hasUpgrade(id: UpgradeId): boolean {

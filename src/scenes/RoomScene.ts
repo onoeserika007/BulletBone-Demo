@@ -7,6 +7,9 @@ import {
   ENEMY_SPAWN_MIN_PLAYER_DISTANCE,
   GAME_HEIGHT,
   GAME_WIDTH,
+  PLAYER_SPAWN_X,
+  PLAYER_SPAWN_Y,
+  RAGE_SHARD_DROP_CHANCE,
   WEAPON_REPLACE_HOLD_MS,
 } from '../config/demoConfig';
 import {
@@ -78,7 +81,9 @@ export class RoomScene extends Phaser.Scene {
   private gravityProjectileGroup?: Phaser.Physics.Arcade.Group;
   private walls?: Phaser.Physics.Arcade.StaticGroup;
   private hud?: Phaser.GameObjects.Text;
+  private healthBar?: Phaser.GameObjects.Graphics;
   private blockHud?: Phaser.GameObjects.Text;
+  private rollHud?: Phaser.GameObjects.Text;
   private bossBar?: Phaser.GameObjects.Graphics;
   private exitPortal?: Phaser.GameObjects.Arc;
   private exitLabel?: Phaser.GameObjects.Text;
@@ -100,7 +105,9 @@ export class RoomScene extends Phaser.Scene {
     this.combatActive = false;
     this.player = undefined;
     this.hud = undefined;
+    this.healthBar = undefined;
     this.blockHud = undefined;
+    this.rollHud = undefined;
     this.bossBar = undefined;
     this.exitPortal = undefined;
     this.exitLabel = undefined;
@@ -130,7 +137,7 @@ export class RoomScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.shutdown, this);
     this.setupDebugKeys();
 
-    if (runState.stage.kind === 'merchant') {
+    if (runState.stage.kind === 'merchant' || runState.stage.kind === 'rest') {
       void this.runNonCombatStage();
       return;
     }
@@ -191,10 +198,18 @@ export class RoomScene extends Phaser.Scene {
   }
 
   private async runNonCombatStage(): Promise<void> {
-    const options = runState.sampleChips();
-    const id = await showChoices('废土商人', '骨匠咧嘴一笑：“第一枚芯片免费。”', options.length ? options : CHIPS.slice(0, 3));
-    if (!this.sys.isActive()) return;
-    runState.applyUpgrade(id);
+    if (runState.stage.kind === 'rest') {
+      await showChoices('休息空间', `骨火稳定燃烧。当前生命 ${Math.ceil(runState.hp)}/${runState.stats.maxHp}`, [{
+        id: 'rest', title: '重组骨架', description: '恢复全部生命，然后继续深入骨塔。', tag: '完全恢复',
+      }]);
+      if (!this.sys.isActive()) return;
+      runState.healFull();
+    } else {
+      const options = runState.sampleChips();
+      const id = await showChoices('废土商店', '骨匠打开零件箱：“这枚芯片算在路费里。”', options.length ? options : CHIPS.slice(0, 3));
+      if (!this.sys.isActive()) return;
+      runState.applyUpgrade(id);
+    }
     this.advanceStage();
   }
 
@@ -207,32 +222,53 @@ export class RoomScene extends Phaser.Scene {
   }
 
   private findSafeEnemySpawnPoint(index: number, total: number): Phaser.Math.Vector2 {
-    let fallback = new Phaser.Math.Vector2(96, 126);
-    let bestSpacing = -1;
-    for (let attempt = 0; attempt < 48; attempt += 1) {
+    const candidates: Phaser.Math.Vector2[] = [];
+    for (let attempt = 0; attempt < 72; attempt += 1) {
       const rotatedIndex = index + attempt * total * 0.381966;
-      const candidate = randomSpawnPoint(rotatedIndex, total);
-      const playerDistance = this.player
-        ? Phaser.Math.Distance.Between(candidate.x, candidate.y, this.player.sprite.x, this.player.sprite.y)
-        : Number.POSITIVE_INFINITY;
-      const nearWall = this.wallRects.some((wall) => (
-        candidate.x >= wall.left - 28
-        && candidate.x <= wall.right + 28
-        && candidate.y >= wall.top - 28
-        && candidate.y <= wall.bottom + 28
-      ));
-      if (playerDistance < ENEMY_SPAWN_MIN_PLAYER_DISTANCE || nearWall) continue;
-      const enemySpacing = this.enemies.reduce((nearest, enemy) => Math.min(
-        nearest,
-        Phaser.Math.Distance.Between(candidate.x, candidate.y, enemy.sprite.x, enemy.sprite.y),
-      ), Number.POSITIVE_INFINITY);
-      if (enemySpacing > bestSpacing) {
-        bestSpacing = enemySpacing;
-        fallback = candidate;
-      }
-      if (enemySpacing >= ENEMY_SPAWN_MIN_ENEMY_DISTANCE) return candidate;
+      candidates.push(randomSpawnPoint(rotatedIndex, total));
     }
-    return fallback;
+    for (let y = 126; y <= GAME_HEIGHT - 96; y += 62) {
+      for (let x = 92; x <= GAME_WIDTH - 92; x += 68) candidates.push(new Phaser.Math.Vector2(x, y));
+    }
+    const safeCandidates = candidates.filter((candidate) => this.isSafeEnemySpawnPoint(candidate));
+    if (safeCandidates.length === 0) {
+      throw new Error(`No safe enemy spawn point for ${runState.stage.id}`);
+    }
+    safeCandidates.sort((left, right) => this.nearestEnemyDistance(right) - this.nearestEnemyDistance(left));
+    return safeCandidates[0];
+  }
+
+  private isSafeEnemySpawnPoint(point: Phaser.Math.Vector2): boolean {
+    const awayFromSpawn = Phaser.Math.Distance.Between(
+      point.x,
+      point.y,
+      PLAYER_SPAWN_X,
+      PLAYER_SPAWN_Y,
+    ) >= ENEMY_SPAWN_MIN_PLAYER_DISTANCE;
+    const awayFromPlayer = !this.player || Phaser.Math.Distance.Between(
+      point.x,
+      point.y,
+      this.player.sprite.x,
+      this.player.sprite.y,
+    ) >= ENEMY_SPAWN_MIN_PLAYER_DISTANCE;
+    const awayFromWalls = !this.wallRects.some((wall) => (
+      point.x >= wall.left - 28
+      && point.x <= wall.right + 28
+      && point.y >= wall.top - 28
+      && point.y <= wall.bottom + 28
+    ));
+    return awayFromSpawn
+      && awayFromPlayer
+      && awayFromWalls
+      && this.nearestEnemyDistance(point) >= ENEMY_SPAWN_MIN_ENEMY_DISTANCE;
+  }
+
+  private nearestEnemyDistance(point: Phaser.Math.Vector2): number {
+    return this.enemies.reduce((nearest, enemy) => (
+      enemy.alive
+        ? Math.min(nearest, Phaser.Math.Distance.Between(point.x, point.y, enemy.sprite.x, enemy.sprite.y))
+        : nearest
+    ), Number.POSITIVE_INFINITY);
   }
 
   private spawnBoss(): void {
@@ -548,8 +584,9 @@ export class RoomScene extends Phaser.Scene {
 
   private onEnemyDeath(enemy: Enemy): void {
     runState.kills += 1;
-    if (runState.rageActive) this.spawnShard(enemy.sprite.x, enemy.sprite.y);
-    else runState.gainMark(this.livingEnemyCount > 0);
+    if (runState.rageActive) {
+      if (enemy.kind !== 'boss' && runRng.next() < RAGE_SHARD_DROP_CHANCE) this.spawnShard(enemy.sprite.x, enemy.sprite.y);
+    } else runState.gainMark(this.livingEnemyCount > 0);
     if (enemy.kind !== 'boss') this.tryDropWeapon(enemy);
 
     if (enemy.kind === 'boss') {
@@ -844,20 +881,26 @@ export class RoomScene extends Phaser.Scene {
       const done = index < runState.stageIndex;
       graphics.fillStyle(active ? COLORS.gold : done ? COLORS.bone : COLORS.muted, active ? 1 : 0.7)
         .fillCircle(startX + index * gap, y, active ? 7 : 5);
-      this.add.text(startX + index * gap, y - 18, stage.kind === 'combat' ? '战' : stage.kind === 'merchant' ? '商' : '王', {
+      const marker = stage.kind === 'combat' ? '战' : stage.kind === 'merchant' ? '商' : stage.kind === 'rest' ? '休' : '王';
+      this.add.text(startX + index * gap, y - 18, marker, {
         color: active ? '#ffcf80' : '#897b71', fontFamily: 'monospace', fontSize: '10px',
       }).setOrigin(0.5).setDepth(70);
     });
   }
 
   private createHud(): void {
-    this.hud = this.add.text(18, 16, '', {
+    this.healthBar = this.add.graphics().setDepth(72);
+    this.hud = this.add.text(18, 45, '', {
       color: '#f4dfba', fontFamily: 'monospace', fontSize: '15px', fontStyle: 'bold',
       backgroundColor: '#0a0c0ecc', padding: { x: 10, y: 8 },
     }).setDepth(70);
-    this.add.text(GAME_WIDTH - 18, 18, 'LMB 射击  RMB 格挡  1/2 切枪  G 丢弃  E 交互', {
+    this.add.text(GAME_WIDTH - 18, 18, 'LMB 射击  RMB 格挡  Shift 翻滚  1/2 切枪  G 丢弃  E 交互', {
       color: '#9b8d82', fontFamily: 'monospace', fontSize: '11px',
     }).setOrigin(1, 0).setDepth(70);
+    this.rollHud = this.add.text(GAME_WIDTH - 18, GAME_HEIGHT - 96, '翻滚就绪  Shift', {
+      color: '#bce8ff', fontFamily: 'monospace', fontSize: '14px', fontStyle: 'bold',
+      backgroundColor: '#0a0c0edd', padding: { x: 10, y: 7 },
+    }).setOrigin(1, 1).setDepth(72);
     this.blockHud = this.add.text(GAME_WIDTH - 18, GAME_HEIGHT - 58, '格挡就绪  RMB', {
       color: '#f1dfbd', fontFamily: 'monospace', fontSize: '14px', fontStyle: 'bold',
       backgroundColor: '#0a0c0edd', padding: { x: 10, y: 7 },
@@ -866,6 +909,13 @@ export class RoomScene extends Phaser.Scene {
 
   private updateHud(): void {
     if (!this.hud) return;
+    if (this.healthBar) {
+      const healthRatio = Phaser.Math.Clamp(runState.hp / runState.stats.maxHp, 0, 1);
+      this.healthBar.clear();
+      this.healthBar.fillStyle(0x100809, 0.94).fillRoundedRect(18, 15, 254, 25, 7);
+      this.healthBar.fillStyle(COLORS.healthRed, 1).fillRoundedRect(22, 19, 246 * healthRatio, 17, 5);
+      this.healthBar.lineStyle(2, 0xff8b83, 0.9).strokeRoundedRect(18, 15, 254, 25, 7);
+    }
     const markBar = Array.from({ length: 5 }, (_, index) => index < runState.marks ? '◆' : '◇').join('');
     const rage = runState.rageActive ? `  狂暴 ${(runState.rageRemainingMs / 1000).toFixed(1)}s` : runState.ragePending ? '  狂暴 READY' : '';
     const slot1 = runState.equippedWeapons[0] ? WEAPON_DEFINITIONS[runState.equippedWeapons[0].definitionId].name : '空';
@@ -887,6 +937,16 @@ export class RoomScene extends Phaser.Scene {
         this.blockHud.setText(`格挡冷却  ${(remaining / 1000).toFixed(1)}s`).setColor('#e57c59');
       } else {
         this.blockHud.setText('格挡就绪  RMB').setColor('#f1dfbd');
+      }
+    }
+    if (this.player && this.rollHud) {
+      const remaining = this.player.rollCooldownRemainingMs;
+      if (this.player.isRolling) {
+        this.rollHud.setText('翻滚闪避').setColor('#ffffff');
+      } else if (remaining > 0) {
+        this.rollHud.setText(`翻滚冷却  ${(remaining / 1000).toFixed(1)}s`).setColor('#63b9d8');
+      } else {
+        this.rollHud.setText('翻滚就绪  Shift').setColor('#bce8ff');
       }
     }
 

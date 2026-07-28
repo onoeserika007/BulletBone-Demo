@@ -48,7 +48,7 @@ export const showMenu = (onStart: () => void): void => {
     <p class="subtitle">骨塔传说 · 接住攻击，点燃狂暴，把整间房轰成废铁。</p>
     <div class="controls">
       <span><kbd>WASD</kbd> 移动</span><span><kbd>鼠标</kbd> 瞄准</span><span><kbd>左键</kbd> 射击</span>
-      <span><kbd>右键</kbd> 格挡反击</span><span><kbd>1 / 2</kbd> 切枪</span><span><kbd>ESC</kbd> 暂停</span>
+      <span><kbd>右键</kbd> 格挡反击</span><span><kbd>Shift</kbd> 翻滚闪避</span><span><kbd>1 / 2</kbd> 切枪</span><span><kbd>ESC</kbd> 暂停</span>
     </div>
     <button class="primary-button">开始狩猎</button>`;
   panel.querySelector('button')?.addEventListener('click', () => {
